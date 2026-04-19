@@ -13,10 +13,12 @@ import csv
 import matplotlib.pyplot as plt
 import argparse
 
-# --- CONFIGURATION ---
+# --- ASSIGNMENT CONFIGURATION ---
 EPOCHS = 20
 BATCH_SIZE = 512
-LAMBDA_VAL = 1e-6 
+# Note: Because the loss is a SUM of ~4 million gates, Lambda must be very small.
+# 1e-6 is "Standard", 5e-6 is "Aggressive".
+LAMBDA_VAL = 1e-05
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -29,38 +31,34 @@ def set_seed(seed=42):
 class PrunableLinear(nn.Module):
     def __init__(self, in_features, out_features):
         super(PrunableLinear, self).__init__()
-        # 1. Standard parameters
+        # Standard parameters
         self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
         self.bias = nn.Parameter(torch.Tensor(out_features))
         
-        # 2. RULE: gate_scores must have the EXACT SAME SHAPE as the weight tensor
+        # RULE: gate_scores must have the EXACT SAME SHAPE as the weight tensor
         self.gate_scores = nn.Parameter(torch.Tensor(out_features, in_features))
         
-        self.reset_parameters()
-
-    def reset_parameters(self):
+        # Initialization
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         nn.init.constant_(self.bias, 0)
-        # Initialize gates slightly positive
-        nn.init.constant_(self.gate_scores, 0.5)
+        nn.init.constant_(self.gate_scores, 0.5) 
 
     def forward(self, x):
-        # 3a. Transformation to gate_scores using Sigmoid
+        # RULE: Apply Sigmoid to gate_scores
         gates = torch.sigmoid(self.gate_scores)
         
-        # 3b. Calculate pruned weights by element-wise multiplication
+        # RULE: Calculate pruned weights (element-wise multiplication)
         pruned_weights = self.weight * gates
         
-        # 3c. Perform standard linear layer operation
+        # RULE: Perform standard linear layer operation with pruned weights
         return F.linear(x, pruned_weights, self.bias)
 
-# --- THE "ULTIMATE" MLP ARCHITECTURE (Assignment Compliant) ---
-class OptimizedPrunableMLP(nn.Module):
+# --- THE "ULTIMATE" MLP ARCHITECTURE ---
+class UltimatePrunableMLP(nn.Module):
     def __init__(self):
-        super(OptimizedPrunableMLP, self).__init__()
+        super(UltimatePrunableMLP, self).__init__()
         self.flatten = nn.Flatten()
         
-        # Consistent with "Standard Feed-Forward" requirement
         # Architecture: Wide & Deep MLP (3072 -> 1024 -> 512 -> 256 -> 10)
         self.fc1 = PrunableLinear(3072, 1024)
         self.bn1 = nn.BatchNorm1d(1024)
@@ -98,10 +96,11 @@ def evaluate_model(model, dataloader, device, threshold=1e-2):
         for inputs, labels in dataloader:
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
-            _, predicted = torch.max(outputs.data, 1)
+            _, prd = torch.max(outputs.data, 1)
             total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+            correct += (prd == labels).sum().item()
     
+    # Calculate Sparsity Level
     total_w, pruned_w = 0, 0
     with torch.no_grad():
         for module in model.modules():
@@ -110,24 +109,37 @@ def evaluate_model(model, dataloader, device, threshold=1e-2):
                 total_w += gates.numel()
                 pruned_w += torch.sum(gates < threshold).item()
                 
-    accuracy = 100 * correct / total
-    sparsity = 100 * pruned_w / total_w if total_w > 0 else 0
-    return accuracy, sparsity
+    return 100 * correct / total, 100 * pruned_w / total_w
+
+def plot_gates_distribution(model, filename, lambda_val):
+    all_gates = []
+    for m in model.modules():
+        if isinstance(m, PrunableLinear):
+            all_gates.extend(torch.sigmoid(m.gate_scores).detach().cpu().numpy().flatten())
+    plt.figure(figsize=(10, 6))
+    plt.hist(all_gates, bins=50, color='blue', alpha=0.7, edgecolor='black')
+    plt.title(f"Weight-level Gate Distribution (Lambda={lambda_val})")
+    plt.xlabel("Gate Value (0 = Pruned, 1 = Kept)")
+    plt.ylabel("Frequency")
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.savefig(filename)
+    plt.close()
 
 def main():
-    parser = argparse.ArgumentParser(description="Optimized Assignment MLP")
-    parser.add_argument('--epochs', type=int, default=20, help='Total epochs')
+    parser = argparse.ArgumentParser(description="Self-Pruning MLP on CIFAR-10")
+    parser.add_argument('--epochs', type=int, default=20, help='Total epochs to train')
     parser.add_argument('--batch-size', type=int, default=512, help='Batch size')
-    parser.add_argument('--lambda-val', type=float, default=1e-6, help='Sparsity penalty')
+    parser.add_argument('--lambda-val', type=float, default=1e-05, help='Sparsity penalty')
     args = parser.parse_known_args()[0]
 
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Running Optimized Assignment Model on: {device}")
-    
+    print(f"Running assignment-compliant training on: {device}")
+
     save_dir = "results"
     os.makedirs(save_dir, exist_ok=True)
 
+    # Data prep
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
@@ -138,21 +150,20 @@ def main():
     testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
     testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    model = OptimizedPrunableMLP().to(device)
+    model = UltimatePrunableMLP().to(device)
     criterion = nn.CrossEntropyLoss()
-    
-    # Differential LR for faster pruning
+
+    # Differential LR: Gates learn faster
     optimizer = optim.Adam([
         {'params': [p for n, p in model.named_parameters() if 'gate_scores' not in n], 'lr': 0.001},
         {'params': [p for n, p in model.named_parameters() if 'gate_scores' in n], 'lr': 0.01}
     ])
 
-    print(f"\nTraining with Strictly Compliant Lambda = {args.lambda_val}...")
+    print(f"\nTraining with Strictly Compliant Lambda Sum = {args.lambda_val}...")
     for epoch in range(args.epochs):
         model.train()
         running_loss = 0.0
-        start_time = time.time()
-        
+        start = time.time()
         for inputs, labels in trainloader:
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -166,18 +177,15 @@ def main():
             running_loss += total_loss.item()
         
         acc, spa = evaluate_model(model, testloader, device)
-        print(f"Epoch {epoch+1:02d} | Loss: {running_loss/len(trainloader):.4f} | Acc: {acc:.2f}% | Sparsity: {spa:.2f}% | Time: {time.time()-start_time:.1f}s")
+        print(f"Epoch {epoch+1:02d} | Loss: {running_loss/len(trainloader):.4f} | Acc: {acc:.2f}% | Sparsity: {spa:.2f}% | Time: {time.time()-start:.1f}s")
+
+    # Final Results
+    acc, spa = evaluate_model(model, testloader, device)
+    print(f"\nFINAL RESULTS:\nAccuracy: {acc:.2f}%\nSparsity: {spa:.2f}%")
 
     # Save distribution plot
-    all_gates = []
-    for m in model.modules():
-        if isinstance(m, PrunableLinear):
-            all_gates.extend(torch.sigmoid(m.gate_scores).detach().cpu().numpy().flatten())
-    plt.figure(figsize=(10,6))
-    plt.hist(all_gates, bins=50, color='blue', alpha=0.7)
-    plt.title(f"Weight-level Gate Distribution (Lambda={args.lambda_val})")
-    plt.savefig(os.path.join(save_dir, 'gate_distribution.png'))
-    print(f"\nResults saved to {save_dir}/")
+    plot_gates_distribution(model, os.path.join(save_dir, f'gates_dist_lambda_{args.lambda_val}.png'), args.lambda_val)
+    print(f"Results saved to {save_dir}/")
 
 if __name__ == "__main__":
     main()
