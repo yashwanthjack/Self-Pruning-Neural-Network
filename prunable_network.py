@@ -129,7 +129,6 @@ def main():
     parser = argparse.ArgumentParser(description="Self-Pruning MLP on CIFAR-10")
     parser.add_argument('--epochs', type=int, default=20, help='Total epochs to train')
     parser.add_argument('--batch-size', type=int, default=512, help='Batch size')
-    parser.add_argument('--lambda-val', type=float, default=1e-05, help='Sparsity penalty')
     args = parser.parse_known_args()[0]
 
     set_seed(42)
@@ -150,42 +149,71 @@ def main():
     testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
     testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    model = UltimatePrunableMLP().to(device)
-    criterion = nn.CrossEntropyLoss()
+    # REQUIREMENT: Compare at least three different values of Lambda
+    lambdas = [0.0, 1e-06, 1e-05]
+    summary_results = []
 
-    # Differential LR: Gates learn faster
-    optimizer = optim.Adam([
-        {'params': [p for n, p in model.named_parameters() if 'gate_scores' not in n], 'lr': 0.001},
-        {'params': [p for n, p in model.named_parameters() if 'gate_scores' in n], 'lr': 0.01}
-    ])
+    for l_val in lambdas:
+        print(f"\n{'='*60}")
+        print(f"--- Training with Lambda = {l_val} ---")
+        print(f"{'='*60}")
 
-    print(f"\nTraining with Strictly Compliant Lambda Sum = {args.lambda_val}...")
-    for epoch in range(args.epochs):
-        model.train()
-        running_loss = 0.0
-        start = time.time()
-        for inputs, labels in trainloader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            
-            # RULE: Total Loss = ClassificationLoss + Lambda * SparsityLoss
-            total_loss = criterion(outputs, labels) + args.lambda_val * get_sparsity_loss(model)
-            
-            total_loss.backward()
-            optimizer.step()
-            running_loss += total_loss.item()
-        
-        acc, spa = evaluate_model(model, testloader, device)
-        print(f"Epoch {epoch+1:02d} | Loss: {running_loss/len(trainloader):.4f} | Acc: {acc:.2f}% | Sparsity: {spa:.2f}% | Time: {time.time()-start:.1f}s")
+        set_seed(42)
+        model = UltimatePrunableMLP().to(device)
+        criterion = nn.CrossEntropyLoss()
 
-    # Final Results
-    acc, spa = evaluate_model(model, testloader, device)
-    print(f"\nFINAL RESULTS:\nAccuracy: {acc:.2f}%\nSparsity: {spa:.2f}%")
+        # Differential LR: Gates learn faster
+        optimizer = optim.Adam([
+            {'params': [p for n, p in model.named_parameters() if 'gate_scores' not in n], 'lr': 0.001},
+            {'params': [p for n, p in model.named_parameters() if 'gate_scores' in n], 'lr': 0.01}
+        ])
 
-    # Save distribution plot
-    plot_gates_distribution(model, os.path.join(save_dir, f'gates_dist_lambda_{args.lambda_val}.png'), args.lambda_val)
-    print(f"Results saved to {save_dir}/")
+        for epoch in range(args.epochs):
+            model.train()
+            running_loss = 0.0
+            start = time.time()
+            for inputs, labels in trainloader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                optimizer.zero_grad()
+                outputs = model(inputs)
+
+                # RULE: Total Loss = ClassificationLoss + Lambda * SparsityLoss
+                total_loss = criterion(outputs, labels) + l_val * get_sparsity_loss(model)
+
+                total_loss.backward()
+                optimizer.step()
+                running_loss += total_loss.item()
+
+            acc, spa = evaluate_model(model, testloader, device)
+            print(f"Epoch {epoch+1:02d}/{args.epochs} | Loss: {running_loss/len(trainloader):.4f} | Acc: {acc:.2f}% | Sparsity: {spa:.2f}% | Time: {time.time()-start:.1f}s")
+
+        # Final evaluation for this lambda
+        final_acc, final_spa = evaluate_model(model, testloader, device)
+        summary_results.append((l_val, final_acc, final_spa))
+
+        # Save gate distribution plot for each lambda
+        if l_val > 0:
+            plot_gates_distribution(model, os.path.join(save_dir, f'gates_dist_lambda_{l_val}.png'), l_val)
+
+    # Print summary table
+    print(f"\n{'='*60}")
+    print("SUMMARY OF RESULTS")
+    print(f"{'='*60}")
+    print(f"| {'Lambda':<10} | {'Test Accuracy (%)':<18} | {'Sparsity Level (%)':<19} |")
+    print(f"|{'-'*12}|{'-'*20}|{'-'*21}|")
+    for l_val, acc, spa in summary_results:
+        print(f"| {l_val:<10} | {acc:<18.2f} | {spa:<19.2f} |")
+
+    # Save summary to CSV
+    summary_csv = os.path.join(save_dir, 'summary_results.csv')
+    with open(summary_csv, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Lambda', 'Test Accuracy (%)', 'Sparsity Level (%)'])
+        for row in summary_results:
+            writer.writerow(row)
+
+    print(f"\nAll results saved to {save_dir}/")
 
 if __name__ == "__main__":
     main()
+
