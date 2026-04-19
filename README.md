@@ -16,7 +16,7 @@ The table below summarizes the trade-off between sparsity penalty (λ) and the r
 
 | Lambda | Test Accuracy (%) | Sparsity Level (%) | Observation |
 |--------|-------------------|--------------------|-------------|
-| 0.0    | 59.08             | 0.00               | Baseline — No pruning pressure |
+| 0.0    | 57.87             | 0.00               | Baseline — No pruning pressure |
 | 1e-06  | 59.08             | 5.22               | Minimal pruning, accuracy preserved |
 | **1e-05** | **59.11**      | **49.95**          | **Sweet Spot — 50% pruned, 0% accuracy loss** |
 
